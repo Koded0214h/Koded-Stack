@@ -1,0 +1,12 @@
+{
+    "name": "fd",
+    "version": "8.7.0",
+    "size": 10240000,
+    "sources": {
+      "darwin-arm64": {"url": "https://github.com/sharkdp/fd/releases/download/v8.7.0/fd-v8.7.0-darwin-arm64.tar.gz","sha256":"abc"},
+      "darwin-amd64": {"url": "https://github.com/sharkdp/fd/releases/download/v8.7.0/fd-v8.7.0-darwin-amd64.tar.gz","sha256":"def"},
+      "linux-x64": {"url": "https://github.com/sharkdp/fd/releases/download/v8.7.0/fd-v8.7.0-x86_64-unknown-linux-gnu.tar.gz","sha256":"ghi"}
+    },
+    "install": {"type": "archive","bin":["fd"]}
+  }
+  

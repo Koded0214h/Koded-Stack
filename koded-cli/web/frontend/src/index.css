@@ -1,0 +1,111 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Noto+Sans:wght@400;500;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply font-display antialiased;
+  }
+  
+  /* Custom Scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: #050a06;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: #22492f;
+    border-radius: 4px;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    background: #0df259;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    background: rgba(16, 35, 22, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  
+  .glow-effect {
+    box-shadow: 0 0 20px rgba(13, 242, 89, 0.15);
+    transition: box-shadow 0.3s ease;
+  }
+  
+  .glow-effect:focus-within, .glow-effect:hover {
+    box-shadow: 0 0 30px rgba(13, 242, 89, 0.3);
+  }
+  
+  .feature-card:hover {
+    transform: translateY(-4px);
+    border-color: #0df259;
+  }
+  
+  .animate-in {
+    animation: animate-in 0.3s ease-out;
+  }
+
+  
+  
+  .fade-in {
+    animation: fade-in 0.4s ease-out;
+  }
+  
+  .zoom-in-95 {
+    animation: zoom-in-95 0.3s ease-out;
+  }
+  
+  @keyframes animate-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  
+  @keyframes zoom-in-95 {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+    /* Add to existing index.css */
+  .animate-spin {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+}
+

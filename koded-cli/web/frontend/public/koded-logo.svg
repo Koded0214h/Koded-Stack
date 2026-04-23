@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="64" height="64" rx="16" fill="#050A06"/>
+  
+  <rect x="8" y="8" width="48" height="48" rx="12" fill="url(#bg-gradient)" stroke="url(#border-gradient)" stroke-width="2"/>
+  
+  <path d="M20 24V40M28 24V40M36 24V40M44 24V40" stroke="url(#terminal-gradient)" stroke-width="3" stroke-linecap="round" stroke-miterlimit="10"/>
+  <path d="M20 32H44" stroke="url(#terminal-gradient)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M20 28H32" stroke="url(#terminal-gradient)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M20 36H40" stroke="url(#terminal-gradient)" stroke-width="3" stroke-linecap="round"/>
+  
+  <defs>
+    <linearGradient id="bg-gradient" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0DF259" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#0DF259" stop-opacity="0.2"/>
+    </linearGradient>
+    
+    <linearGradient id="border-gradient" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0DF259" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#0DF259" stop-opacity="0.6"/>
+    </linearGradient>
+    
+    <linearGradient id="terminal-gradient" x1="20" y1="24" x2="44" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0DF259"/>
+      <stop offset="1" stop-color="#0DF259" stop-opacity="0.8"/>
+    </linearGradient>
+  </defs>
+</svg>

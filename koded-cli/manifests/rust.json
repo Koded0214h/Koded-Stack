@@ -1,0 +1,12 @@
+{
+    "name": "rust",
+    "version": "1.75.0",
+    "size": 134217728,
+    "sources": {
+      "darwin-arm64": {"url": "https://static.rust-lang.org/rust-1.75.0-darwin-arm64.tar.gz", "sha256": "abc123"},
+      "darwin-amd64": {"url": "https://static.rust-lang.org/rust-1.75.0-darwin-amd64.tar.gz", "sha256": "def123"},
+      "linux-x64": {"url": "https://static.rust-lang.org/rust-1.75.0-linux-x64.tar.gz", "sha256": "ghi123"}
+    },
+    "install": {"type": "archive", "bin": ["rustc","cargo"]}
+  }
+  

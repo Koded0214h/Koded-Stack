@@ -1,0 +1,52 @@
+# =====================
+# Go build artifacts
+# =====================
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# =====================
+# Go workspace
+# =====================
+go.work
+go.work.sum
+
+# =====================
+# Vendor (if ever used)
+# =====================
+vendor/
+
+# =====================
+# OS-specific files
+# =====================
+.DS_Store
+Thumbs.db
+
+# =====================
+# Editor / IDE files
+# =====================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =====================
+# Logs
+# =====================
+*.log
+
+# =====================
+# koded runtime data
+# (future-proofing)
+# =====================
+.koded/
+
+*.venv/
+
+*.env

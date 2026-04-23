@@ -1,0 +1,26 @@
+{
+    "name": "go",
+    "version": "1.22.0",
+    "size": 123000000,
+    "sources": {
+      "darwin-arm64": {
+        "url": "https://golang.org/dl/go1.22.0.darwin-arm64.tar.gz",
+        "sha256": "e9c52a4bcf98e9af6391d0d6e7b7c6c2a61c2212b03a2a0d3737af3f71d3c5f2",
+        "size": 123000000
+      },
+      "darwin-amd64": {
+        "url": "https://golang.org/dl/go1.22.0.darwin-amd64.tar.gz",
+        "sha256": "24f2c5f3d5b58d1b2e6c3d1b3f4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+        "size": 125000000
+      },
+      "linux-amd64": {
+        "url": "https://golang.org/dl/go1.22.0.linux-amd64.tar.gz",
+        "sha256": "9a22c2a6e7d9f3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8",
+        "size": 122000000
+      }
+    },
+    "install": {
+      "type": "archive",
+      "bin": ["go", "gofmt"]
+    }
+  }

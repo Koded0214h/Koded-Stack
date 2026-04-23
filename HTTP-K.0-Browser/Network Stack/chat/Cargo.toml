@@ -1,0 +1,22 @@
+[package]
+name = "chat"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[[bin]]
+name = "chat_server"
+path = "src/biDirectionalChat/server.rs"
+
+[[bin]]
+name = "chat_client"
+path = "src/biDirectionalChat/client.rs"
+
+[[bin]]
+name = "udp_chat_server"
+path = "src/udpChat/server.rs"
+
+[[bin]]
+name = "udp_chat_client"
+path = "src/udpChat/client.rs"
