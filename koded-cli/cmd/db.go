@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,25 +16,31 @@ import (
 var dbCmd = &cobra.Command{
 	Use:   "db",
 	Short: "KodedDB interactive query shell",
-	Long: `Open an interactive SQL shell connected to a KodedDB database.
+	Long: `Open an interactive SQL shell connected to a KodedDB server.
 
-  koded db                      open default database (~/.koded/data/koded.db)
-  koded db --file ./mydb.db    open a specific database file
-  koded db --exec "SELECT 1"   run a single query and exit`,
+  koded db                          connect to local server (127.0.0.1:6380)
+  koded db --host 192.168.1.5       connect to remote server
+  koded db --port 7000              use a different port
+  koded db --exec "SELECT 1;"       run a single query and exit
+  koded db --no-server              offline mode (no server needed)`,
 	Run: runDB,
 }
 
 var (
-	dbFile    string
-	dbExec    string
-	dbNoColor bool
+	dbHost     string
+	dbPort     string
+	dbExec     string
+	dbNoColor  bool
+	dbNoServer bool
 )
 
 func init() {
 	rootCmd.AddCommand(dbCmd)
-	dbCmd.Flags().StringVar(&dbFile,    "file",     "", "Path to database file")
-	dbCmd.Flags().StringVar(&dbExec,    "exec",     "", "Execute a single SQL statement and exit")
-	dbCmd.Flags().BoolVar(&dbNoColor,   "no-color", false, "Disable colored output")
+	dbCmd.Flags().StringVar(&dbHost,     "host",      "127.0.0.1", "KodedDB server host")
+	dbCmd.Flags().StringVar(&dbPort,     "port",      "6380",      "KodedDB server port")
+	dbCmd.Flags().StringVar(&dbExec,     "exec",      "",          "Execute a single SQL statement and exit")
+	dbCmd.Flags().BoolVar(&dbNoColor,    "no-color",  false,       "Disable colored output")
+	dbCmd.Flags().BoolVar(&dbNoServer,   "no-server", false,       "Run in offline mode (no server connection)")
 }
 
 // ── Colors ────────────────────────────────────────────────────────────────────
@@ -42,9 +49,9 @@ const (
 	colorReset  = "\033[0m"
 	colorGreen  = "\033[32m"
 	colorCyan   = "\033[36m"
-	colorYellow = "\033[33m"
 	colorRed    = "\033[31m"
 	colorGray   = "\033[90m"
+	colorYellow = "\033[33m"
 	colorBold   = "\033[1m"
 )
 
@@ -53,48 +60,150 @@ func color(c, s string) string {
 	return c + s + colorReset
 }
 
-// ── Session ───────────────────────────────────────────────────────────────────
+// ── Wire types (mirrors api package) ──────────────────────────────────────────
 
-type dbSession struct {
-	file    string
-	tables  map[string]*inMemTable
-	history []string
+type dbRequest struct {
+	SQL string `json:"sql,omitempty"`
+	Cmd string `json:"cmd,omitempty"`
 }
 
-type inMemTable struct {
-	Schema []string            `json:"schema"`
-	Rows   []map[string]string `json:"rows"`
+type dbResponse struct {
+	OK       bool       `json:"ok"`
+	Columns  []string   `json:"columns,omitempty"`
+	Rows     [][]string `json:"rows,omitempty"`
+	Affected int        `json:"affected,omitempty"`
+	Message  string     `json:"message,omitempty"`
+	Error    string     `json:"error,omitempty"`
+	TimeMs   float64    `json:"time_ms,omitempty"`
 }
 
-func newSession(file string) *dbSession {
-	s := &dbSession{file: file, tables: make(map[string]*inMemTable)}
-	s.loadState()
-	return s
+// ── TCP client ────────────────────────────────────────────────────────────────
+
+type dbClient struct {
+	conn    net.Conn
+	scanner *bufio.Scanner
+	writer  *bufio.Writer
+	addr    string
 }
+
+func dialDB(host, port string) (*dbClient, error) {
+	addr := host + ":" + port
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	c := &dbClient{
+		conn:    conn,
+		scanner: bufio.NewScanner(conn),
+		writer:  bufio.NewWriter(conn),
+		addr:    addr,
+	}
+	// Read welcome banner
+	c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	c.scanner.Scan() // discard welcome message
+	c.conn.SetReadDeadline(time.Time{})
+	return c, nil
+}
+
+func (c *dbClient) query(sql string) (*dbResponse, error) {
+	return c.send(dbRequest{SQL: sql})
+}
+
+func (c *dbClient) cmd(command string) (*dbResponse, error) {
+	return c.send(dbRequest{Cmd: command})
+}
+
+func (c *dbClient) send(req dbRequest) (*dbResponse, error) {
+	data, _ := json.Marshal(req)
+	c.writer.Write(data)
+	c.writer.WriteByte('\n')
+	if err := c.writer.Flush(); err != nil {
+		return nil, err
+	}
+	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if !c.scanner.Scan() {
+		return nil, fmt.Errorf("connection closed")
+	}
+	var resp dbResponse
+	json.Unmarshal(c.scanner.Bytes(), &resp)
+	return &resp, nil
+}
+
+func (c *dbClient) close() { c.conn.Close() }
 
 // ── Main runner ───────────────────────────────────────────────────────────────
 
 func runDB(cmd *cobra.Command, args []string) {
-	if dbFile == "" {
-		home, _ := os.UserHomeDir()
-		dbFile = filepath.Join(home, ".koded", "data", "koded.db")
-	}
-	os.MkdirAll(filepath.Dir(dbFile), 0755)
+	addr := dbHost + ":" + dbPort
 
-	sess := newSession(dbFile)
-
+	// ── Single exec mode ──────────────────────────────────────────────────────
 	if dbExec != "" {
-		result := sess.exec(dbExec)
-		fmt.Print(result.render(dbNoColor))
+		if dbNoServer {
+			fmt.Println(color(colorRed, "✗ --exec requires a server connection (remove --no-server)"))
+			os.Exit(1)
+		}
+		client, err := dialDB(dbHost, dbPort)
+		if err != nil {
+			fmt.Printf("  %s Cannot connect to %s: %v\n", color(colorRed, "✗"), addr, err)
+			os.Exit(1)
+		}
+		defer client.close()
+
+		resp, err := client.query(dbExec)
+		if err != nil {
+			fmt.Printf("  %s %v\n", color(colorRed, "✗"), err)
+			os.Exit(1)
+		}
+		fmt.Print(renderResponse(resp))
 		return
 	}
 
+	// ── Interactive REPL ──────────────────────────────────────────────────────
 	printBanner()
-	fmt.Printf("  %s %s\n",   color(colorGray, "Database:"), color(colorCyan, dbFile))
-	fmt.Printf("  %s\n\n",    color(colorGray, "Type .help for commands, .exit to quit"))
 
+	var client *dbClient
+	var offline bool
+
+	if dbNoServer {
+		offline = true
+		fmt.Printf("  %s running in offline mode\n\n",
+			color(colorGray, "⚠"),
+		)
+	} else {
+		var err error
+		client, err = dialDB(dbHost, dbPort)
+		if err != nil {
+			fmt.Printf("  %s Cannot connect to %s\n",
+				color(colorRed, "✗"), color(colorCyan, addr))
+			fmt.Printf("  %s Start the server with: %s\n\n",
+				color(colorGray, "→"),
+				color(colorCyan, "go run . --addr "+addr),
+			)
+			fmt.Printf("  %s Falling back to offline mode...\n\n",
+				color(colorGray, "⚠"),
+			)
+			offline = true
+		} else {
+			defer client.close()
+			fmt.Printf("  %s %s\n\n",
+				color(colorGray, "Connected:"),
+				color(colorGreen, "✓ "+addr),
+			)
+		}
+	}
+
+	if offline {
+		fmt.Printf("  %s\n\n",
+			color(colorGray, "Offline mode: only .help, .exit available — connect a server for SQL"),
+		)
+	}
+
+	fmt.Printf("  %s\n\n", color(colorGray, "Type .help for commands  |  End SQL with ;  |  .exit to quit"))
+
+	// ── Input loop ────────────────────────────────────────────────────────────
 	scanner := bufio.NewScanner(os.Stdin)
 	var multiLine strings.Builder
+	history  := []string{}
 
 	for {
 		if multiLine.Len() == 0 {
@@ -103,71 +212,148 @@ func runDB(cmd *cobra.Command, args []string) {
 			fmt.Print(color(colorGray, "   ... "))
 		}
 
-		if !scanner.Scan() { fmt.Println(color(colorGray, "\nBye.")); break }
+		if !scanner.Scan() {
+			fmt.Println(color(colorGray, "\nBye."))
+			break
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" { continue }
 
+		// Dot commands
 		if strings.HasPrefix(line, ".") {
-			if handleMeta(line, sess) { break }
+			if handleMeta(line, client, offline) { break }
 			continue
 		}
 
 		multiLine.WriteString(line + " ")
 
+		// Execute on semicolon
 		if strings.HasSuffix(line, ";") {
 			sql := strings.TrimSpace(multiLine.String())
 			multiLine.Reset()
 			if sql == ";" { continue }
 
-			start  := time.Now()
-			result := sess.exec(sql)
+			history = append(history, strings.TrimSuffix(sql, ";"))
+
+			if offline {
+				fmt.Printf("  %s Not connected to a server. Start with: %s\n",
+					color(colorRed, "✗"),
+					color(colorCyan, "go run . --addr 0.0.0.0:6380"),
+				)
+				continue
+			}
+
+			start := time.Now()
+			resp, err := client.query(sql)
 			elapsed := time.Since(start)
 
-			fmt.Print(result.render(dbNoColor))
-			fmt.Printf("%s\n", color(colorGray, fmt.Sprintf("  (%s)", elapsed.Round(time.Microsecond))))
+			if err != nil {
+				// Try to reconnect once
+				fmt.Printf("  %s Connection lost, reconnecting...\n", color(colorGray, "⚠"))
+				client, err = dialDB(dbHost, dbPort)
+				if err != nil {
+					fmt.Printf("  %s Reconnect failed: %v\n", color(colorRed, "✗"), err)
+					offline = true
+					continue
+				}
+				resp, _ = client.query(sql)
+			}
+
+			fmt.Print(renderResponse(resp))
+			fmt.Printf("%s\n", color(colorGray,
+				fmt.Sprintf("  (%.2fms)", float64(elapsed.Microseconds())/1000.0)))
 		}
 	}
 }
 
 // ── Meta commands ─────────────────────────────────────────────────────────────
 
-func handleMeta(line string, sess *dbSession) bool {
+func handleMeta(line string, client *dbClient, offline bool) bool {
 	parts := strings.Fields(line)
 	switch parts[0] {
 	case ".exit", ".quit", ".q":
 		fmt.Println(color(colorGray, "Bye."))
 		return true
+
 	case ".tables":
-		if len(sess.tables) == 0 {
-			fmt.Println(color(colorGray, "  (no tables)"))
-		} else {
-			for name := range sess.tables {
-				fmt.Printf("  %s\n", color(colorCyan, name))
-			}
+		if offline || client == nil {
+			fmt.Printf("  %s Not connected\n", color(colorRed, "✗"))
+			return false
 		}
-	case ".schema":
-		if len(parts) < 2 {
-			fmt.Println(color(colorRed, "  Usage: .schema <table>"))
-		} else {
-			if t, ok := sess.tables[parts[1]]; ok {
-				fmt.Printf("  %s (%s)\n", color(colorCyan, parts[1]), strings.Join(t.Schema, ", "))
-			} else {
-				fmt.Printf("  %s\n", color(colorRed, "table '"+parts[1]+"' not found"))
-			}
+		resp, err := client.cmd("tables")
+		if err != nil {
+			fmt.Printf("  %s %v\n", color(colorRed, "✗"), err)
+			return false
 		}
+		fmt.Print(renderResponse(resp))
+
+	case ".ping":
+		if offline || client == nil {
+			fmt.Printf("  %s Not connected\n", color(colorRed, "✗"))
+			return false
+		}
+		start := time.Now()
+		resp, err := client.cmd("ping")
+		rtt := time.Since(start)
+		if err != nil {
+			fmt.Printf("  %s %v\n", color(colorRed, "✗"), err)
+			return false
+		}
+		if resp.OK {
+			fmt.Printf("  %s pong  %s\n",
+				color(colorGreen, "✓"),
+				color(colorGray, rtt.Round(time.Microsecond).String()),
+			)
+		}
+
+	case ".stats":
+		if offline || client == nil {
+			fmt.Printf("  %s Not connected\n", color(colorRed, "✗"))
+			return false
+		}
+		resp, err := client.cmd("stats")
+		if err != nil {
+			fmt.Printf("  %s %v\n", color(colorRed, "✗"), err)
+			return false
+		}
+		if resp.OK && resp.Message != "" {
+			fmt.Printf("  %s\n", resp.Message)
+		} else {
+			data, _ := json.MarshalIndent(resp, "  ", "  ")
+			fmt.Println(string(data))
+		}
+
+	case ".flush":
+		if offline || client == nil {
+			fmt.Printf("  %s Not connected\n", color(colorRed, "✗"))
+			return false
+		}
+		resp, err := client.cmd("flush")
+		if err != nil {
+			fmt.Printf("  %s %v\n", color(colorRed, "✗"), err)
+			return false
+		}
+		fmt.Printf("  %s %s\n",
+			color(colorGreen, "✓"), resp.Message)
+
 	case ".clear":
 		fmt.Print("\033[2J\033[H")
 		printBanner()
-	case ".history":
-		for i, h := range sess.history {
-			fmt.Printf("  %s  %s\n", color(colorGray, fmt.Sprintf("%3d", i+1)), h)
-		}
-	case ".file":
-		fmt.Printf("  %s %s\n", color(colorGray, "File:"), color(colorCyan, sess.file))
+
 	case ".help":
 		printMetaHelp()
+
+	case ".server":
+		if offline || client == nil {
+			fmt.Printf("  %s Not connected\n", color(colorRed, "✗"))
+		} else {
+			fmt.Printf("  %s %s\n",
+				color(colorGray, "Server:"),
+				color(colorCyan, client.addr))
+		}
+
 	default:
-		fmt.Printf("  %s Unknown command %q. Type %s for help.\n",
+		fmt.Printf("  %s Unknown command %q — type %s\n",
 			color(colorRed, "✗"), parts[0], color(colorCyan, ".help"))
 	}
 	return false
@@ -175,65 +361,64 @@ func handleMeta(line string, sess *dbSession) bool {
 
 func printMetaHelp() {
 	cmds := [][]string{
-		{".tables",        "List all tables"},
-		{".schema <table>","Show schema for a table"},
-		{".file",          "Show current database file"},
-		{".history",       "Show command history"},
+		{".tables",        "List all tables (from server)"},
+		{".ping",          "Ping the server, show RTT"},
+		{".stats",         "Show server + engine statistics"},
+		{".flush",         "Flush memtable to disk"},
+		{".server",        "Show connected server address"},
 		{".clear",         "Clear the screen"},
 		{".help",          "Show this help"},
 		{".exit / .quit",  "Exit the shell"},
 	}
 	fmt.Println()
 	for _, c := range cmds {
-		fmt.Printf("  %-22s %s\n", color(colorCyan, c[0]), color(colorGray, c[1]))
+		fmt.Printf("  %-22s %s\n",
+			color(colorCyan, c[0]),
+			color(colorGray, c[1]),
+		)
 	}
+	fmt.Println()
+	fmt.Printf("  %s\n",
+		color(colorGray, "SQL: end statements with ; — multi-line supported"),
+	)
 	fmt.Println()
 }
 
-// ── Result rendering ──────────────────────────────────────────────────────────
+// ── Response rendering ────────────────────────────────────────────────────────
 
-type QueryResult struct {
-	Columns  []string
-	Rows     [][]string
-	Affected int
-	Message  string
-	IsError  bool
-}
-
-func (r *QueryResult) render(noColor bool) string {
+func renderResponse(resp *dbResponse) string {
 	c := func(col, s string) string {
-		if noColor { return s }
+		if dbNoColor { return s }
 		return col + s + colorReset
 	}
 	var sb strings.Builder
 
-	if r.IsError {
-		sb.WriteString(fmt.Sprintf("  %s %s\n", c(colorRed, "✗"), r.Message))
+	if !resp.OK {
+		sb.WriteString(fmt.Sprintf("  %s %s\n", c(colorRed, "✗"), resp.Error))
 		return sb.String()
 	}
-	if r.Message != "" && len(r.Columns) == 0 {
-		sb.WriteString(fmt.Sprintf("  %s %s\n", c(colorGreen, "✓"), r.Message))
+	if resp.Message != "" && len(resp.Columns) == 0 {
+		sb.WriteString(fmt.Sprintf("  %s %s\n", c(colorGreen, "✓"), resp.Message))
 		return sb.String()
 	}
-	if len(r.Columns) == 0 { return "" }
+	if len(resp.Columns) == 0 { return "" }
 
 	// Column widths
-	widths := make([]int, len(r.Columns))
-	for i, col := range r.Columns { widths[i] = len(col) }
-	for _, row := range r.Rows {
+	widths := make([]int, len(resp.Columns))
+	for i, col := range resp.Columns { widths[i] = len(col) }
+	for _, row := range resp.Rows {
 		for i, cell := range row {
 			if i < len(widths) && len(cell) > widths[i] { widths[i] = len(cell) }
 		}
 	}
 
-	// Header
 	sb.WriteString("\n")
 	header, divider := "  ", "  "
-	for i, col := range r.Columns {
+	for i, col := range resp.Columns {
 		w := widths[i]
 		header  += c(colorBold+colorCyan, fmt.Sprintf("%-*s", w, col))
 		divider += strings.Repeat("─", w)
-		if i < len(r.Columns)-1 {
+		if i < len(resp.Columns)-1 {
 			header  += c(colorGray, "  │  ")
 			divider += c(colorGray, "──┼──")
 		}
@@ -241,223 +426,25 @@ func (r *QueryResult) render(noColor bool) string {
 	sb.WriteString(header + "\n")
 	sb.WriteString(c(colorGray, divider) + "\n")
 
-	if len(r.Rows) == 0 {
+	if len(resp.Rows) == 0 {
 		sb.WriteString(fmt.Sprintf("  %s\n", c(colorGray, "(empty)")))
 	}
-	for _, row := range r.Rows {
+	for _, row := range resp.Rows {
 		line := "  "
 		for i, cell := range row {
 			if i >= len(widths) { break }
 			line += fmt.Sprintf("%-*s", widths[i], cell)
-			if i < len(r.Columns)-1 { line += c(colorGray, "  │  ") }
+			if i < len(resp.Columns)-1 { line += c(colorGray, "  │  ") }
 		}
 		sb.WriteString(line + "\n")
 	}
-	count := fmt.Sprintf("%d row", len(r.Rows))
-	if len(r.Rows) != 1 { count += "s" }
+	count := fmt.Sprintf("%d row", len(resp.Rows))
+	if len(resp.Rows) != 1 { count += "s" }
 	sb.WriteString(fmt.Sprintf("\n  %s\n", c(colorGray, count)))
 	return sb.String()
 }
 
-// ── SQL executor ──────────────────────────────────────────────────────────────
-
-func (s *dbSession) exec(sql string) *QueryResult {
-	s.history = append(s.history, strings.TrimRight(sql, ";"))
-	sql   = strings.TrimRight(strings.TrimSpace(sql), ";")
-	upper := strings.ToUpper(sql)
-
-	switch {
-	case strings.HasPrefix(upper, "SELECT 1"):
-		return &QueryResult{Columns: []string{"1"}, Rows: [][]string{{"1"}}}
-	case strings.HasPrefix(upper, "CREATE TABLE"):
-		return s.execCreate(sql)
-	case strings.HasPrefix(upper, "DROP TABLE"):
-		return s.execDrop(sql)
-	case strings.HasPrefix(upper, "INSERT INTO"):
-		return s.execInsert(sql)
-	case strings.HasPrefix(upper, "SELECT"):
-		return s.execSelect(sql)
-	case strings.HasPrefix(upper, "DELETE FROM"):
-		return s.execDelete(sql)
-	case strings.HasPrefix(upper, "SHOW TABLES"):
-		return s.execShowTables()
-	default:
-		return &QueryResult{IsError: true,
-			Message: "unsupported statement — connect kodeddb-core for full SQL support"}
-	}
-}
-
-func (s *dbSession) execCreate(sql string) *QueryResult {
-	upper := strings.ToUpper(sql)
-	after := strings.TrimSpace(sql[strings.Index(upper, "TABLE")+5:])
-	paren := strings.Index(after, "(")
-	if paren < 0 { return errResult("invalid CREATE TABLE syntax") }
-	tableName := strings.TrimSpace(after[:paren])
-	colsDef   := after[paren+1 : strings.LastIndex(after, ")")]
-	if _, exists := s.tables[tableName]; exists {
-		return errResult(fmt.Sprintf("table %q already exists", tableName))
-	}
-	var cols []string
-	for _, part := range strings.Split(colsDef, ",") {
-		if f := strings.Fields(strings.TrimSpace(part)); len(f) >= 1 {
-			cols = append(cols, f[0])
-		}
-	}
-	s.tables[tableName] = &inMemTable{Schema: cols}
-	s.persistState()
-	return &QueryResult{Message: fmt.Sprintf("table %q created", tableName)}
-}
-
-func (s *dbSession) execDrop(sql string) *QueryResult {
-	upper := strings.ToUpper(sql)
-	after := strings.TrimSpace(sql[strings.Index(upper, "TABLE")+5:])
-	name  := strings.Fields(after)[0]
-	if _, ok := s.tables[name]; !ok { return errResult(fmt.Sprintf("table %q not found", name)) }
-	delete(s.tables, name)
-	s.persistState()
-	return &QueryResult{Message: fmt.Sprintf("table %q dropped", name)}
-}
-
-func (s *dbSession) execInsert(sql string) *QueryResult {
-	upper := strings.ToUpper(sql)
-	after := strings.TrimSpace(sql[strings.Index(upper, "INTO")+4:])
-	parts := strings.Fields(after)
-	if len(parts) == 0 { return errResult("invalid INSERT syntax") }
-	tableName := parts[0]
-	tbl, ok := s.tables[tableName]
-	if !ok { return errResult(fmt.Sprintf("table %q not found", tableName)) }
-
-	valIdx := strings.Index(strings.ToUpper(after), "VALUES")
-	if valIdx < 0 { return errResult("missing VALUES keyword") }
-	vals := parseValueList(after[valIdx+6:])
-
-	row := make(map[string]string)
-	for i, col := range tbl.Schema {
-		if i < len(vals) { row[col] = vals[i] } else { row[col] = "NULL" }
-	}
-	tbl.Rows = append(tbl.Rows, row)
-	s.persistState()
-	return &QueryResult{Message: "1 row inserted", Affected: 1}
-}
-
-func (s *dbSession) execSelect(sql string) *QueryResult {
-	upper   := strings.ToUpper(sql)
-	fromIdx := strings.Index(upper, "FROM")
-	if fromIdx < 0 { return errResult("missing FROM clause") }
-	afterFrom := strings.TrimSpace(sql[fromIdx+4:])
-	tableName  := strings.Fields(afterFrom)[0]
-	tbl, ok := s.tables[tableName]
-	if !ok { return errResult(fmt.Sprintf("table %q not found", tableName)) }
-
-	between := strings.TrimSpace(sql[6:fromIdx])
-	var cols []string
-	if strings.TrimSpace(between) == "*" {
-		cols = tbl.Schema
-	} else {
-		for _, c := range strings.Split(between, ",") { cols = append(cols, strings.TrimSpace(c)) }
-	}
-
-	filterCol, filterVal := "", ""
-	if whereIdx := strings.Index(upper, "WHERE"); whereIdx >= 0 {
-		wherePart := strings.TrimSpace(sql[whereIdx+5:])
-		for _, kw := range []string{"LIMIT", "ORDER"} {
-			if idx := strings.Index(strings.ToUpper(wherePart), kw); idx >= 0 {
-				wherePart = wherePart[:idx]
-			}
-		}
-		if eqIdx := strings.Index(wherePart, "="); eqIdx >= 0 {
-			filterCol = strings.TrimSpace(wherePart[:eqIdx])
-			filterVal = strings.Trim(strings.TrimSpace(wherePart[eqIdx+1:]), "'\"")
-		}
-	}
-
-	limit := -1
-	if limitIdx := strings.Index(upper, "LIMIT"); limitIdx >= 0 {
-		fmt.Sscanf(strings.TrimSpace(sql[limitIdx+5:]), "%d", &limit)
-	}
-
-	var rows [][]string
-	for _, row := range tbl.Rows {
-		if filterCol != "" {
-			if v, ok := row[filterCol]; !ok || v != filterVal { continue }
-		}
-		var cells []string
-		for _, col := range cols { cells = append(cells, row[col]) }
-		rows = append(rows, cells)
-		if limit > 0 && len(rows) >= limit { break }
-	}
-	return &QueryResult{Columns: cols, Rows: rows}
-}
-
-func (s *dbSession) execDelete(sql string) *QueryResult {
-	upper  := strings.ToUpper(sql)
-	after  := strings.TrimSpace(sql[strings.Index(upper, "FROM")+4:])
-	name   := strings.Fields(after)[0]
-	tbl, ok := s.tables[name]
-	if !ok { return errResult(fmt.Sprintf("table %q not found", name)) }
-
-	whereIdx := strings.Index(strings.ToUpper(after), "WHERE")
-	if whereIdx < 0 {
-		n := len(tbl.Rows); tbl.Rows = nil; s.persistState()
-		return &QueryResult{Message: fmt.Sprintf("%d row(s) deleted", n), Affected: n}
-	}
-	wherePart := strings.TrimSpace(after[whereIdx+5:])
-	eqIdx := strings.Index(wherePart, "=")
-	if eqIdx < 0 { return errResult("unsupported WHERE in DELETE") }
-	fc := strings.TrimSpace(wherePart[:eqIdx])
-	fv := strings.Trim(strings.TrimSpace(wherePart[eqIdx+1:]), "'\"")
-
-	var kept []map[string]string
-	deleted := 0
-	for _, row := range tbl.Rows {
-		if row[fc] == fv { deleted++ } else { kept = append(kept, row) }
-	}
-	tbl.Rows = kept; s.persistState()
-	return &QueryResult{Message: fmt.Sprintf("%d row(s) deleted", deleted), Affected: deleted}
-}
-
-func (s *dbSession) execShowTables() *QueryResult {
-	var rows [][]string
-	for name := range s.tables { rows = append(rows, []string{name}) }
-	return &QueryResult{Columns: []string{"table_name"}, Rows: rows}
-}
-
-// ── Persistence ───────────────────────────────────────────────────────────────
-
-type persistedState struct {
-	Tables map[string]*inMemTable `json:"tables"`
-}
-
-func (s *dbSession) persistState() {
-	data, err := json.MarshalIndent(persistedState{Tables: s.tables}, "", "  ")
-	if err != nil { return }
-	os.WriteFile(s.file+".repl.json", data, 0644)
-}
-
-func (s *dbSession) loadState() {
-	data, err := os.ReadFile(s.file + ".repl.json")
-	if err != nil { return }
-	var state persistedState
-	if err := json.Unmarshal(data, &state); err != nil { return }
-	if state.Tables != nil { s.tables = state.Tables }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-func errResult(msg string) *QueryResult {
-	return &QueryResult{IsError: true, Message: msg}
-}
-
-func parseValueList(s string) []string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "(")
-	s = strings.TrimSuffix(s, ")")
-	var vals []string
-	for _, v := range strings.Split(s, ",") {
-		vals = append(vals, strings.Trim(strings.TrimSpace(v), "'\""))
-	}
-	return vals
-}
+// ── Banner ────────────────────────────────────────────────────────────────────
 
 func printBanner() {
 	fmt.Print(color(colorGreen, `
@@ -468,4 +455,23 @@ func printBanner() {
   ██║  ██╗╚██████╔╝██████╔╝███████╗██████╔╝    ██████╔╝██████╔╝
   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚═════╝     ╚═════╝ ╚═════╝ 
 `))
+}
+
+// ── Unused but kept for offline fallback persistence ──────────────────────────
+
+type persistedState struct {
+	Tables map[string]*offlineTable `json:"tables"`
+}
+type offlineTable struct {
+	Schema []string            `json:"schema"`
+	Rows   []map[string]string `json:"rows"`
+}
+
+func loadOfflineState(file string) map[string]*offlineTable {
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(file), "koded.repl.json"))
+	if err != nil { return make(map[string]*offlineTable) }
+	var state persistedState
+	json.Unmarshal(data, &state)
+	if state.Tables == nil { return make(map[string]*offlineTable) }
+	return state.Tables
 }
